@@ -1,4 +1,4 @@
-import * as XLSX from "xlsx";
+import * as XLSX from "xlsx-js-style";
 
 export interface InvoiceSheetInfo {
   name: string;
@@ -15,15 +15,134 @@ export interface InvoiceMergeResult {
   workbook: XLSX.WorkBook;
 }
 
+export interface InvoiceFileInfo {
+  sheetNames: string[];
+  columns: string[];
+}
+
+/**
+ * Chuyển index cột (0-based) thành chữ cái Excel: 0→A, 1→B, 25→Z, 26→AA...
+ */
+function colIndexToLetter(idx: number): string {
+  let letter = "";
+  let n = idx;
+  while (n >= 0) {
+    letter = String.fromCharCode((n % 26) + 65) + letter;
+    n = Math.floor(n / 26) - 1;
+  }
+  return letter;
+}
+
+/**
+ * Chuyển chữ cái Excel thành index cột (0-based): A→0, B→1, Z→25, AA→26...
+ */
+export function colLetterToIndex(letter: string): number {
+  let idx = 0;
+  for (let i = 0; i < letter.length; i++) {
+    idx = idx * 26 + (letter.charCodeAt(i) - 64);
+  }
+  return idx - 1;
+}
+
+/**
+ * Đọc file Excel và trả về danh sách sheet + tên cột (chữ cái Excel + giá trị mẫu) để user chọn.
+ */
+export function readInvoiceFile(fileBuffer: ArrayBuffer): InvoiceFileInfo {
+  const wb = XLSX.read(fileBuffer, { type: "array" });
+  const firstSheet = wb.Sheets[wb.SheetNames[0]];
+  const raw: unknown[][] = XLSX.utils.sheet_to_json(firstSheet, {
+    header: 1,
+    defval: null,
+  });
+
+  const struct = findStructure(raw);
+  const columns: string[] = [];
+
+  // Tìm dòng header có "STT" để lấy tên cột
+  let headerRow: unknown[] = [];
+  for (let i = Math.max(0, struct.dataStartRow - 5); i < struct.dataStartRow; i++) {
+    const row = raw[i] || [];
+    const first = String(row[0] ?? "").trim().toUpperCase();
+    if (first === "STT") {
+      headerRow = row;
+      break;
+    }
+  }
+
+  // Tìm sample value: quét nhiều dòng data để lấy giá trị mẫu cho mỗi cột
+  const sampleValues: string[] = new Array(struct.colCount).fill("");
+  const maxScan = Math.min(struct.dataStartRow + 10, raw.length);
+  for (let i = struct.dataStartRow; i < maxScan; i++) {
+    const row = raw[i] || [];
+    // Dừng nếu gặp dòng tổng
+    const hasTotal = row.some((cell) => {
+      const s = String(cell ?? "").trim().toLowerCase();
+      return s === "tổng" || s.startsWith("tổng giá trị");
+    });
+    if (hasTotal) break;
+
+    for (let j = 0; j < struct.colCount; j++) {
+      if (sampleValues[j]) continue; // đã có sample
+      const val = String(row[j] ?? "").trim();
+      if (val) sampleValues[j] = val;
+    }
+    // Dừng sớm nếu đã có đủ sample
+    if (sampleValues.every((v) => v)) break;
+  }
+
+  for (let j = 0; j < struct.colCount; j++) {
+    const letter = colIndexToLetter(j);
+    const headerText = String(headerRow[j] ?? "").trim();
+    const sample = sampleValues[j];
+
+    if (headerText && sample) {
+      columns.push(`${letter}: ${headerText} (${sample})`);
+    } else if (headerText) {
+      columns.push(`${letter}: ${headerText}`);
+    } else if (sample) {
+      columns.push(`${letter}: ${sample}`);
+    } else {
+      columns.push(letter);
+    }
+  }
+
+  return {
+    sheetNames: wb.SheetNames,
+    columns,
+  };
+}
+
+/**
+ * Copy style từ 1 cell của source sheet sang cell của output sheet.
+ */
+function copyCellStyle(
+  sourceWs: XLSX.WorkSheet,
+  sourceRow: number,
+  sourceCol: number,
+  targetWs: XLSX.WorkSheet,
+  targetRow: number,
+  targetCol: number
+) {
+  const srcAddr = XLSX.utils.encode_cell({ r: sourceRow, c: sourceCol });
+  const tgtAddr = XLSX.utils.encode_cell({ r: targetRow, c: targetCol });
+  const srcCell = sourceWs[srcAddr];
+  const tgtCell = targetWs[tgtAddr];
+  if (srcCell?.s && tgtCell) {
+    tgtCell.s = srcCell.s;
+  }
+}
+
 /**
  * Phân tích file Excel nhiều sheet (T1, T2...) và tổng hợp thành 1 sheet duy nhất.
- * Mỗi sheet là bảng kê hoá đơn mua vào 1 tháng.
+ * Giữ nguyên format (màu, border, font) từ file gốc.
  */
 export function mergeInvoiceSheets(
   fileBuffer: ArrayBuffer,
-  outputName: string
+  outputName: string,
+  giaTriColName: string,
+  thueColName: string
 ): InvoiceMergeResult {
-  const wb = XLSX.read(fileBuffer, { type: "array" });
+  const wb = XLSX.read(fileBuffer, { type: "array", cellStyles: true });
 
   const sheetsInfo: InvoiceSheetInfo[] = [];
   let grandTotalGiaTri = 0;
@@ -31,25 +150,43 @@ export function mergeInvoiceSheets(
   let grandTotalRows = 0;
 
   // Đọc header từ sheet đầu tiên để dùng làm template
-  const firstSheet = wb.Sheets[wb.SheetNames[0]];
+  const firstSheetName = wb.SheetNames[0];
+  const firstSheet = wb.Sheets[firstSheetName];
   const firstRaw: unknown[][] = XLSX.utils.sheet_to_json(firstSheet, {
     header: 1,
     defval: null,
   });
 
-  // Tìm dòng header cột (chứa "STT") và dòng bắt đầu data
-  const { headerRows, dataStartRow, colCount, giaTriCol, thueCol } =
-    findStructure(firstRaw);
+  const firstStruct = findStructure(firstRaw);
+  const { dataStartRow, colCount } = firstStruct;
 
-  // Build output rows
-  const outputRows: unknown[][] = [];
+  // Lấy index cột từ chữ cái Excel (VD: "I" → 8, "K" → 10)
+  const giaTriCol = colLetterToIndex(giaTriColName.trim().toUpperCase());
+  const thueCol = colLetterToIndex(thueColName.trim().toUpperCase());
 
-  // Copy header rows từ sheet đầu (phần tiêu đề bảng kê, thông tin công ty...)
-  for (let i = 0; i < dataStartRow; i++) {
-    outputRows.push(padRow(firstRaw[i] || [], colCount));
+  if (giaTriCol < 0 || thueCol < 0) {
+    throw new Error("Không tìm thấy cột đã chọn trong file. Vui lòng kiểm tra lại.");
   }
 
+  // Build output rows + tracking nguồn gốc style cho mỗi dòng
+  const outputRows: unknown[][] = [];
+  // Mỗi entry: { sheetName, sourceRow } để biết copy style từ đâu
+  const rowSources: Array<{ sheetName: string; sourceRow: number } | null> = [];
+
+  // Copy header rows từ sheet đầu
+  for (let i = 0; i < dataStartRow; i++) {
+    outputRows.push(padRow(firstRaw[i] || [], colCount));
+    rowSources.push({ sheetName: firstSheetName, sourceRow: i });
+  }
+
+  // Tìm 1 dòng data mẫu trong sheet đầu để lấy style cho data rows
+  const firstDataRows = extractDataRows(firstRaw, firstStruct);
+  const sampleDataSourceRow = firstDataRows.length > 0
+    ? firstStruct.dataStartRow // dòng data đầu tiên trong sheet gốc
+    : -1;
+
   // Xử lý từng sheet (tháng)
+  // Dùng dataStartRow từ sheet đầu tiên cho tất cả sheet (vì cấu trúc giống nhau)
   for (const sheetName of wb.SheetNames) {
     const ws = wb.Sheets[sheetName];
     const raw: unknown[][] = XLSX.utils.sheet_to_json(ws, {
@@ -57,20 +194,20 @@ export function mergeInvoiceSheets(
       defval: null,
     });
 
-    // Tìm cấu trúc cho sheet này
-    const sheetStruct = findStructure(raw);
-
-    // Lấy data rows (giữa header và dòng "Tổng")
-    const dataRows = extractDataRows(raw, sheetStruct.dataStartRow);
+    // Thử tìm structure riêng, fallback về structure sheet đầu
+    let sheetStruct = findStructure(raw);
+    if (sheetStruct.dataStartRow === 0) {
+      // Sheet này không detect được header → dùng structure từ sheet đầu
+      sheetStruct = { ...firstStruct, headerRows: raw.slice(0, firstStruct.dataStartRow) };
+    }
+    const dataRows = extractDataRows(raw, sheetStruct);
 
     let sheetGiaTri = 0;
     let sheetThue = 0;
 
     for (const row of dataRows) {
-      const gv = toNumber(row[giaTriCol]);
-      const th = toNumber(row[thueCol]);
-      sheetGiaTri += gv;
-      sheetThue += th;
+      sheetGiaTri += toNumber(row[giaTriCol]);
+      sheetThue += toNumber(row[thueCol]);
     }
 
     sheetsInfo.push({
@@ -88,29 +225,38 @@ export function mergeInvoiceSheets(
     const labelRow = new Array(colCount).fill(null);
     labelRow[0] = sheetName;
     outputRows.push(labelRow);
+    rowSources.push(null); // label row - không copy style
 
-    // Thêm data rows
+    // Thêm data rows - lấy style từ dòng data tương ứng trong sheet nguồn
+    let dataIdx = 0;
     for (const row of dataRows) {
       outputRows.push(padRow(row, colCount));
+      rowSources.push({
+        sheetName,
+        sourceRow: sheetStruct.dataStartRow + dataIdx,
+      });
+      dataIdx++;
     }
   }
 
-  // Thêm dòng trống
+  // Dòng trống
   outputRows.push(new Array(colCount).fill(null));
+  rowSources.push(null);
 
   // Dòng "Tổng"
   const totalRow = new Array(colCount).fill(null);
-  totalRow[0] = "";
-  // Tìm cột gần giữa để ghi "Tổng"
   const tongLabelCol = Math.max(0, giaTriCol - 2);
   totalRow[tongLabelCol] = "Tổng";
   totalRow[giaTriCol] = grandTotalGiaTri;
   totalRow[thueCol] = grandTotalThue;
   outputRows.push(totalRow);
+  rowSources.push(null); // sẽ style riêng bên dưới
 
   // Dòng trống
   outputRows.push(new Array(colCount).fill(null));
   outputRows.push(new Array(colCount).fill(null));
+  rowSources.push(null);
+  rowSources.push(null);
 
   // Dòng tổng kết cuối
   const summaryRow1 = new Array(colCount).fill(null);
@@ -118,23 +264,134 @@ export function mergeInvoiceSheets(
     "Tổng giá trị HHDV mua vào phục vụ SXKD được khấu trừ thuế GTGT (**):";
   summaryRow1[giaTriCol] = grandTotalGiaTri;
   outputRows.push(summaryRow1);
+  rowSources.push(null);
 
   const summaryRow2 = new Array(colCount).fill(null);
   summaryRow2[0] =
     "Tổng số thuế GTGT của HHDV mua vào đủ điều kiện được khấu trừ (***):";
   summaryRow2[giaTriCol] = grandTotalThue;
   outputRows.push(summaryRow2);
+  rowSources.push(null);
 
   // Tạo workbook output
   const outWs = XLSX.utils.aoa_to_sheet(outputRows);
 
-  // Copy column widths từ sheet đầu nếu có
+  // Copy column widths
   if (firstSheet["!cols"]) {
     outWs["!cols"] = firstSheet["!cols"];
   }
 
+  // Copy row heights từ sheet gốc cho header
+  if (firstSheet["!rows"]) {
+    outWs["!rows"] = [];
+    for (let i = 0; i < dataStartRow; i++) {
+      if (firstSheet["!rows"][i]) {
+        outWs["!rows"][i] = { ...firstSheet["!rows"][i] };
+      }
+    }
+  }
+
+  // Copy merged cells từ header của sheet đầu
+  if (firstSheet["!merges"]) {
+    outWs["!merges"] = [];
+    for (const merge of firstSheet["!merges"]) {
+      // Chỉ copy merges trong vùng header
+      if (merge.s.r < dataStartRow) {
+        outWs["!merges"].push({ ...merge });
+      }
+    }
+  }
+
+  // Copy cell styles từ source sheets sang output
+  for (let outRow = 0; outRow < outputRows.length; outRow++) {
+    const source = rowSources[outRow];
+    if (!source) continue;
+
+    const sourceWs = wb.Sheets[source.sheetName];
+    for (let col = 0; col < colCount; col++) {
+      copyCellStyle(sourceWs, source.sourceRow, col, outWs, outRow, col);
+    }
+  }
+
+  // Style cho dòng "Tổng" và summary - bold font
+  const boldStyle = {
+    font: { bold: true, sz: 11 },
+  };
+
+  // Tìm index dòng Tổng (sau dòng trống cuối data)
+  const totalRowIdx = outputRows.length - 5; // Tổng row
+  const summary1Idx = outputRows.length - 2;
+  const summary2Idx = outputRows.length - 1;
+
+  for (const rowIdx of [totalRowIdx, summary1Idx, summary2Idx]) {
+    for (let col = 0; col < colCount; col++) {
+      const addr = XLSX.utils.encode_cell({ r: rowIdx, c: col });
+      if (outWs[addr]) {
+        // Giữ style gốc nếu có, thêm bold
+        outWs[addr].s = { ...(outWs[addr].s || {}), ...boldStyle };
+      }
+    }
+  }
+
+  // Style cho label tháng (T1, T2...) - bold + background
+  const labelStyle = {
+    font: { bold: true, sz: 11 },
+    fill: { fgColor: { rgb: "D9E2F3" } },
+  };
+  for (let outRow = 0; outRow < outputRows.length; outRow++) {
+    if (rowSources[outRow] === null) {
+      const firstCellAddr = XLSX.utils.encode_cell({ r: outRow, c: 0 });
+      const cell = outWs[firstCellAddr];
+      if (cell && typeof cell.v === "string" && wb.SheetNames.includes(cell.v)) {
+        for (let col = 0; col < colCount; col++) {
+          const addr = XLSX.utils.encode_cell({ r: outRow, c: col });
+          if (!outWs[addr]) {
+            outWs[addr] = { t: "s", v: "" };
+          }
+          outWs[addr].s = { ...labelStyle };
+        }
+      }
+    }
+  }
+
+  // Apply border cho tất cả data cells (giống file gốc)
+  // Lấy border style từ dòng data đầu tiên của sheet gốc
+  if (sampleDataSourceRow >= 0) {
+    const sampleAddr = XLSX.utils.encode_cell({ r: sampleDataSourceRow, c: 0 });
+    const sampleCell = firstSheet[sampleAddr];
+    const sampleBorder = sampleCell?.s?.border;
+
+    if (sampleBorder) {
+      // Apply border cho data rows không có style
+      for (let outRow = dataStartRow; outRow < outputRows.length; outRow++) {
+        const source = rowSources[outRow];
+        if (source) continue; // đã có style từ source
+        for (let col = 0; col < colCount; col++) {
+          const addr = XLSX.utils.encode_cell({ r: outRow, c: col });
+          if (outWs[addr] && outWs[addr].s) {
+            outWs[addr].s.border = outWs[addr].s.border || sampleBorder;
+          }
+        }
+      }
+    }
+  }
+
+  // Number format cho cột giá trị + thuế
+  const numFmt = "#,##0";
+  for (let outRow = dataStartRow; outRow < outputRows.length; outRow++) {
+    for (const col of [giaTriCol, thueCol]) {
+      const addr = XLSX.utils.encode_cell({ r: outRow, c: col });
+      const cell = outWs[addr];
+      if (cell && typeof cell.v === "number") {
+        cell.s = { ...(cell.s || {}), numFmt };
+        cell.z = numFmt;
+      }
+    }
+  }
+
   const outWb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(outWb, outWs, outputName || "Tổng hợp");
+  const wsName = (outputName || "Tổng hợp").slice(0, 31);
+  XLSX.utils.book_append_sheet(outWb, outWs, wsName);
 
   return {
     sheets: sheetsInfo,
@@ -158,54 +415,53 @@ interface SheetStructure {
   headerRows: unknown[][];
   dataStartRow: number;
   colCount: number;
-  giaTriCol: number;
-  thueCol: number;
 }
 
 function findStructure(raw: unknown[][]): SheetStructure {
   let dataStartRow = 0;
-  let colCount = 10; // default
-  let giaTriCol = 7; // default col I (0-indexed = 8, but often col index varies)
-  let thueCol = 9; // default col K
+  let colCount = 10;
 
-  // Tìm dòng có "(1)" hoặc "STT" ở cột đầu tiên - đây là dòng sub-header
-  // Dòng data bắt đầu ngay sau đó
-  for (let i = 0; i < Math.min(raw.length, 20); i++) {
+  // Tìm dòng "(1)" — sub-header numbering
+  for (let i = 0; i < Math.min(raw.length, 25); i++) {
     const row = raw[i] || [];
     const firstCell = String(row[0] ?? "").trim();
-    const secondCell = String(row[1] ?? "").trim();
 
-    // Tìm dòng có "(1)" - sub-header numbering row
-    if (firstCell === "(1)" && secondCell === "(2)") {
+    if (firstCell === "(1)") {
       dataStartRow = i + 1;
       colCount = row.length;
       break;
     }
+  }
 
-    // Hoặc tìm dòng "STT"
-    if (firstCell === "STT" || firstCell.toLowerCase() === "stt") {
-      // Dòng tiếp theo có thể là sub-header (1), (2)...
-      if (i + 1 < raw.length) {
-        const nextRow = raw[i + 1] || [];
-        const nextFirst = String(nextRow[0] ?? "").trim();
-        if (nextFirst === "(1)") {
-          dataStartRow = i + 2;
-          colCount = Math.max(row.length, nextRow.length);
+  // Tìm dòng "STT"
+  if (dataStartRow === 0) {
+    for (let i = 0; i < Math.min(raw.length, 25); i++) {
+      const row = raw[i] || [];
+      const firstCell = String(row[0] ?? "").trim().toUpperCase();
+
+      if (firstCell === "STT") {
+        if (i + 1 < raw.length) {
+          const nextRow = raw[i + 1] || [];
+          const nextFirst = String(nextRow[0] ?? "").trim();
+          if (nextFirst === "(1)") {
+            dataStartRow = i + 2;
+            colCount = Math.max(row.length, nextRow.length);
+          } else {
+            dataStartRow = i + 1;
+            colCount = row.length;
+          }
         } else {
           dataStartRow = i + 1;
           colCount = row.length;
         }
-      } else {
-        dataStartRow = i + 1;
-        colCount = row.length;
+        break;
       }
-      break;
     }
   }
 
-  // Nếu không tìm được, dùng heuristic: tìm dòng đầu tiên có số 1 ở cột đầu
+  // Heuristic: tìm dòng có STT = 1
   if (dataStartRow === 0) {
-    for (let i = 0; i < Math.min(raw.length, 20); i++) {
+    for (let i = 0; i < Math.min(raw.length, 25); i++) {
       const row = raw[i] || [];
       if (toNumber(row[0]) === 1 && row.length > 3) {
         dataStartRow = i;
@@ -215,66 +471,42 @@ function findStructure(raw: unknown[][]): SheetStructure {
     }
   }
 
-  // Tìm cột "Giá trị HHDV" và "Thuế GTGT" từ header rows
-  for (let i = Math.max(0, dataStartRow - 4); i < dataStartRow; i++) {
-    const row = raw[i] || [];
-    for (let j = 0; j < row.length; j++) {
-      const cell = String(row[j] ?? "").toLowerCase();
-      if (
-        cell.includes("giá trị") &&
-        (cell.includes("hhdv") || cell.includes("mua vào") || cell.includes("chưa có thuế"))
-      ) {
-        giaTriCol = j;
-      }
-      if (
-        cell.includes("thuế gtgt") ||
-        (cell.includes("thuế") && cell.includes("khấu trừ"))
-      ) {
-        thueCol = j;
-      }
-    }
-  }
-
   const headerRows = raw.slice(0, dataStartRow);
-
-  return { headerRows, dataStartRow, colCount, giaTriCol, thueCol };
+  return { headerRows, dataStartRow, colCount };
 }
 
-function extractDataRows(raw: unknown[][], dataStartRow: number): unknown[][] {
+function extractDataRows(
+  raw: unknown[][],
+  struct: SheetStructure
+): unknown[][] {
   const dataRows: unknown[][] = [];
 
-  for (let i = dataStartRow; i < raw.length; i++) {
+  for (let i = struct.dataStartRow; i < raw.length; i++) {
     const row = raw[i] || [];
-    const firstCell = String(row[0] ?? "").trim().toLowerCase();
 
-    // Dừng khi gặp dòng "Tổng" hoặc dòng tổng kết
-    if (
-      firstCell === "tổng" ||
-      firstCell.includes("tổng giá trị") ||
-      firstCell.includes("tổng số thuế")
-    ) {
-      break;
-    }
+    // Skip dòng trống
+    const hasData = row.some(
+      (cell) => cell !== null && cell !== undefined && String(cell).trim() !== ""
+    );
+    if (!hasData) continue;
 
-    // Kiểm tra cột khác có chứa "Tổng" không (có thể "Tổng" nằm ở cột giữa)
+    // Dừng khi gặp dòng "Tổng"
     let isTotalRow = false;
-    for (let j = 0; j < Math.min(row.length, 8); j++) {
+    for (let j = 0; j < row.length; j++) {
       const cell = String(row[j] ?? "").trim().toLowerCase();
-      if (cell === "tổng") {
+      if (cell === "tổng" || cell.startsWith("tổng giá trị") || cell.startsWith("tổng số thuế")) {
         isTotalRow = true;
         break;
       }
     }
     if (isTotalRow) break;
 
-    // Skip dòng hoàn toàn trống
-    const hasData = row.some(
-      (cell) => cell !== null && cell !== undefined && String(cell).trim() !== ""
-    );
-    if (!hasData) continue;
+    // Skip dòng mô tả (ví dụ "1. Hàng hoá, dịch vụ dùng riêng...")
+    const firstCell = String(row[0] ?? "").trim();
+    if (firstCell.match(/^\d+\.\s+\D/)) {
+      continue;
+    }
 
-    // Skip dòng chỉ có text mô tả (không có số ở cột cuối)
-    // Nhưng vẫn giữ dòng data bình thường
     dataRows.push(row);
   }
 
@@ -284,7 +516,7 @@ function extractDataRows(raw: unknown[][], dataStartRow: number): unknown[][] {
 function toNumber(val: unknown): number {
   if (val === null || val === undefined) return 0;
   if (typeof val === "number") return val;
-  const str = String(val).replace(/[,.\s]/g, "");
+  const str = String(val).replace(/,/g, "").trim();
   const num = parseFloat(str);
   return isNaN(num) ? 0 : num;
 }

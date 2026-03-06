@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback } from "react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { FileUploader } from "@/components/excel/file-uploader";
 import { DataPreview } from "@/components/excel/data-preview";
@@ -28,6 +29,8 @@ export default function DistributeOrdersPage() {
 
   const [result, setResult] = useState<DistributionResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   const handleFileSelect = useCallback(
     async (file: File, setter: (f: ExcelFile | null) => void) => {
@@ -63,25 +66,39 @@ export default function DistributeOrdersPage() {
       return;
     }
 
-    const mrSheet = mrFile.sheets[0];
-    const orderSheet = orderFile.sheets[0];
+    setLoading(true);
+    setResult(null);
+    setTimeout(() => {
+      try {
+        const mrSheet = mrFile.sheets[0];
+        const orderSheet = orderFile.sheets[0];
 
-    const employees = parseMRLong(mrSheet.rows, sttCol, nameCol, amountCol);
-    if (employees.length === 0) {
-      setError(
-        "Không tìm thấy nhân viên nào trong file Lương doanh số. Kiểm tra lại cột STT, Họ tên, Lương doanh số."
-      );
-      return;
-    }
+        const employees = parseMRLong(mrSheet.rows, sttCol, nameCol, amountCol);
+        if (employees.length === 0) {
+          setError(
+            "Không tìm thấy nhân viên nào trong file Lương doanh số. Kiểm tra lại cột STT, Họ tên, Lương doanh số."
+          );
+          return;
+        }
 
-    const distributionResult = distributeOrders(
-      employees,
-      orderSheet.rows,
-      blDeptCol,
-      soJobCol,
-      orderAmountCol
-    );
-    setResult(distributionResult);
+        const distributionResult = distributeOrders(
+          employees,
+          orderSheet.rows,
+          blDeptCol,
+          soJobCol,
+          orderAmountCol
+        );
+        setResult(distributionResult);
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Có lỗi xảy ra khi xử lý. Vui lòng kiểm tra lại dữ liệu."
+        );
+      } finally {
+        setLoading(false);
+      }
+    }, 50);
   }, [mrFile, orderFile, sttCol, nameCol, amountCol, blDeptCol, soJobCol, orderAmountCol]);
 
   const buildExportData = useCallback(
@@ -138,8 +155,16 @@ export default function DistributeOrdersPage() {
 
   const handleExport = useCallback(() => {
     if (!result) return;
-    const exportData = buildExportData(showSubtotals);
-    exportToExcel(exportData, outputName, "Lương Kinh Doanh");
+    setExporting(true);
+    toast.success("Đang tải file...");
+    setTimeout(() => {
+      try {
+        const exportData = buildExportData(showSubtotals);
+        exportToExcel(exportData, outputName, "Lương Kinh Doanh");
+      } finally {
+        setExporting(false);
+      }
+    }, 50);
   }, [result, outputName, showSubtotals, buildExportData]);
 
   const mrSheet = mrFile?.sheets[0];
@@ -359,17 +384,42 @@ export default function DistributeOrdersPage() {
         </div>
       )}
       {mrSheet && orderSheet && (
-        <div className="flex gap-3 mb-6">
+        <div className="flex items-center gap-3 mb-6">
           <Button
             onClick={handleDistribute}
-            disabled={!sttCol || !nameCol || !amountCol || !blDeptCol || !soJobCol || !orderAmountCol}
+            disabled={loading || !sttCol || !nameCol || !amountCol || !blDeptCol || !soJobCol || !orderAmountCol}
           >
-            Thực hiện phân bổ
+            {loading ? "Đang xử lý..." : "Thực hiện phân bổ"}
           </Button>
           {result && (
-            <Button variant="outline" onClick={handleExport}>
-              Tải file kết quả (.xlsx)
+            <Button variant="outline" onClick={handleExport} disabled={exporting}>
+              {exporting ? "Đang xuất file..." : "Tải file kết quả (.xlsx)"}
             </Button>
+          )}
+          {loading && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <svg
+                className="animate-spin h-4 w-4"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+              >
+                <circle
+                  className="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  strokeWidth="4"
+                />
+                <path
+                  className="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                />
+              </svg>
+              Đang phân bổ đơn hàng, vui lòng chờ...
+            </div>
           )}
         </div>
       )}

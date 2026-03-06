@@ -1,29 +1,44 @@
 "use client";
 
 import { useState, useCallback } from "react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { FileUploader } from "@/components/excel/file-uploader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
+  readInvoiceFile,
   mergeInvoiceSheets,
   downloadWorkbook,
 } from "@/lib/excel/invoice-merger";
-import type { InvoiceMergeResult } from "@/lib/excel/invoice-merger";
+import type {
+  InvoiceMergeResult,
+  InvoiceFileInfo,
+} from "@/lib/excel/invoice-merger";
 
 export default function MergeInvoicesPage() {
   const [fileName, setFileName] = useState<string | undefined>();
   const [fileBuffer, setFileBuffer] = useState<ArrayBuffer | null>(null);
+  const [fileInfo, setFileInfo] = useState<InvoiceFileInfo | null>(null);
+  const [giaTriCol, setGiaTriCol] = useState("");
+  const [thueCol, setThueCol] = useState("");
   const [outputName, setOutputName] = useState("Tổng hợp bảng kê mua vào");
   const [result, setResult] = useState<InvoiceMergeResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   const handleFileSelect = useCallback(async (file: File) => {
     setError(null);
     setResult(null);
+    setFileInfo(null);
+    setGiaTriCol("");
+    setThueCol("");
     try {
       const buffer = await file.arrayBuffer();
       setFileBuffer(buffer);
       setFileName(file.name);
+      const info = readInvoiceFile(buffer);
+      setFileInfo(info);
     } catch {
       setError("Không thể đọc file. Vui lòng kiểm tra định dạng file.");
     }
@@ -32,6 +47,9 @@ export default function MergeInvoicesPage() {
   const handleClear = useCallback(() => {
     setFileName(undefined);
     setFileBuffer(null);
+    setFileInfo(null);
+    setGiaTriCol("");
+    setThueCol("");
     setResult(null);
     setError(null);
   }, []);
@@ -42,25 +60,54 @@ export default function MergeInvoicesPage() {
       setError("Vui lòng upload file Excel.");
       return;
     }
-    try {
-      const mergeResult = mergeInvoiceSheets(fileBuffer, outputName);
-      if (mergeResult.sheets.length === 0) {
-        setError("Không tìm thấy sheet nào trong file.");
-        return;
-      }
-      setResult(mergeResult);
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Có lỗi xảy ra khi xử lý file. Vui lòng kiểm tra lại định dạng."
-      );
+    const gt = giaTriCol.trim().toUpperCase();
+    const th = thueCol.trim().toUpperCase();
+    if (!gt || !th) {
+      setError("Vui lòng nhập cột Giá trị HHDV và Thuế GTGT (VD: I, K).");
+      return;
     }
-  }, [fileBuffer, outputName]);
+    if (!/^[A-Z]{1,2}$/.test(gt) || !/^[A-Z]{1,2}$/.test(th)) {
+      setError("Tên cột không hợp lệ. Vui lòng nhập chữ cái Excel (VD: I, K, AA).");
+      return;
+    }
+    setLoading(true);
+    setResult(null);
+    setTimeout(() => {
+      try {
+        const mergeResult = mergeInvoiceSheets(
+          fileBuffer,
+          outputName,
+          gt,
+          th
+        );
+        if (mergeResult.sheets.length === 0) {
+          setError("Không tìm thấy sheet nào trong file.");
+        } else {
+          setResult(mergeResult);
+        }
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Có lỗi xảy ra khi xử lý file. Vui lòng kiểm tra lại định dạng."
+        );
+      } finally {
+        setLoading(false);
+      }
+    }, 50);
+  }, [fileBuffer, outputName, giaTriCol, thueCol]);
 
   const handleExport = useCallback(() => {
     if (!result) return;
-    downloadWorkbook(result.workbook, outputName);
+    setExporting(true);
+    toast.success("Đang tải file...");
+    setTimeout(() => {
+      try {
+        downloadWorkbook(result.workbook, outputName);
+      } finally {
+        setExporting(false);
+      }
+    }, 50);
   }, [result, outputName]);
 
   return (
@@ -105,13 +152,12 @@ export default function MergeInvoicesPage() {
               đặt tên là T1, T2, T3... tương ứng từng tháng.
             </li>
             <li>
-              Mỗi sheet có cấu trúc bảng kê hoá đơn mua vào: STT, Mã hoá đơn,
-              Số hoá đơn, Ngày, Tên người bán, MST, Mặt hàng, Giá trị HHDV,
-              Thuế GTGT, Ghi chú.
+              Upload file → hệ thống sẽ tự nhận diện các sheet.
             </li>
             <li>
-              Upload file → hệ thống sẽ tự động nhận diện các sheet và số dòng
-              dữ liệu mỗi tháng.
+              Nhập <strong>chữ cái cột</strong> trong Excel cho{" "}
+              <strong>Giá trị HHDV</strong> và <strong>Thuế GTGT</strong>{" "}
+              (VD: I, K). Mở file Excel để xem cột nào tương ứng.
             </li>
             <li>
               Đặt tên file xuất rồi nhấn <strong>Thực hiện tổng hợp</strong>.
@@ -131,8 +177,61 @@ export default function MergeInvoicesPage() {
         </div>
       </div>
 
+      {/* Thông tin file + nhập cột */}
+      {fileInfo && (
+        <div className="mb-6 space-y-4">
+          {/* Danh sách sheet */}
+          <div className="p-3 bg-muted/30 border border-border rounded-md">
+            <p className="text-sm font-medium mb-1">
+              Nhận diện được {fileInfo.sheetNames.length} sheet:
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {fileInfo.sheetNames.join(", ")}
+            </p>
+          </div>
+
+          {/* Nhập cột */}
+          <div>
+            <h2 className="text-sm font-semibold mb-3">
+              Nhập cột giá trị và thuế
+            </h2>
+            <p className="text-xs text-muted-foreground mb-3">
+              Mở file Excel, xem cột nào chứa &quot;Giá trị HHDV&quot; và &quot;Thuế GTGT&quot;, rồi nhập chữ cái cột tương ứng (VD: I, K).
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium mb-1.5">
+                  Cột Giá trị HHDV mua vào chưa có thuế
+                </label>
+                <input
+                  type="text"
+                  value={giaTriCol}
+                  onChange={(e) => setGiaTriCol(e.target.value.toUpperCase())}
+                  className="w-24 px-3 py-2 border border-border rounded-md text-sm bg-background uppercase text-center font-mono"
+                  placeholder="VD: I"
+                  maxLength={2}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-1.5">
+                  Cột Thuế GTGT đủ điều kiện khấu trừ
+                </label>
+                <input
+                  type="text"
+                  value={thueCol}
+                  onChange={(e) => setThueCol(e.target.value.toUpperCase())}
+                  className="w-24 px-3 py-2 border border-border rounded-md text-sm bg-background uppercase text-center font-mono"
+                  placeholder="VD: K"
+                  maxLength={2}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Tên file xuất */}
-      {fileBuffer && (
+      {fileInfo && (
         <div className="mb-6">
           <label className="block text-sm font-semibold mb-2">
             Tên file xuất
@@ -148,13 +247,43 @@ export default function MergeInvoicesPage() {
       )}
 
       {/* Nút thực hiện */}
-      {fileBuffer && (
-        <div className="flex gap-3 mb-6">
-          <Button onClick={handleMerge}>Thực hiện tổng hợp</Button>
+      {fileInfo && (
+        <div className="flex items-center gap-3 mb-6">
+          <Button
+            onClick={handleMerge}
+            disabled={loading || !giaTriCol.trim() || !thueCol.trim()}
+          >
+            {loading ? "Đang xử lý..." : "Thực hiện tổng hợp"}
+          </Button>
           {result && (
-            <Button variant="outline" onClick={handleExport}>
-              Tải file kết quả (.xlsx)
+            <Button variant="outline" onClick={handleExport} disabled={exporting}>
+              {exporting ? "Đang xuất file..." : "Tải file kết quả (.xlsx)"}
             </Button>
+          )}
+          {loading && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <svg
+                className="animate-spin h-4 w-4"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+              >
+                <circle
+                  className="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  strokeWidth="4"
+                />
+                <path
+                  className="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                />
+              </svg>
+              Đang tổng hợp dữ liệu, vui lòng chờ...
+            </div>
           )}
         </div>
       )}

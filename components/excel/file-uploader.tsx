@@ -1,13 +1,13 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 
 interface FileUploaderProps {
   label: string;
   fileName?: string;
-  onFileSelect: (file: File) => void;
+  onFileSelect: (file: File) => void | Promise<void>;
   onClear: () => void;
 }
 
@@ -17,26 +17,42 @@ export function FileUploader({
   onFileSelect,
   onClear,
 }: FileUploaderProps) {
+  const [loading, setLoading] = useState(false);
+
+  const handleFile = useCallback(
+    async (file: File) => {
+      setLoading(true);
+      // Cho UI render loading trước khi xử lý file nặng
+      await new Promise((r) => setTimeout(r, 50));
+      try {
+        await onFileSelect(file);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [onFileSelect]
+  );
+
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
       const file = e.dataTransfer.files[0];
       if (file && isExcelFile(file)) {
-        onFileSelect(file);
+        handleFile(file);
       }
     },
-    [onFileSelect]
+    [handleFile]
   );
 
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (file) {
-        onFileSelect(file);
+        handleFile(file);
       }
       e.target.value = "";
     },
-    [onFileSelect]
+    [handleFile]
   );
 
   return (
@@ -45,7 +61,33 @@ export function FileUploader({
         <CardTitle className="text-sm font-medium">{label}</CardTitle>
       </CardHeader>
       <CardContent>
-        {fileName ? (
+        {loading ? (
+          <div className="flex items-center justify-center gap-2 p-6 border-2 border-dashed border-primary/30 rounded-md bg-primary/5">
+            <svg
+              className="animate-spin h-4 w-4 text-primary"
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+            >
+              <circle
+                className="opacity-25"
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="currentColor"
+                strokeWidth="4"
+              />
+              <path
+                className="opacity-75"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+              />
+            </svg>
+            <span className="text-sm text-primary font-medium">
+              Đang đọc file...
+            </span>
+          </div>
+        ) : fileName ? (
           <div className="flex items-center justify-between p-3 bg-accent rounded-md">
             <span className="text-sm truncate">{fileName}</span>
             <Button variant="ghost" size="sm" onClick={onClear}>

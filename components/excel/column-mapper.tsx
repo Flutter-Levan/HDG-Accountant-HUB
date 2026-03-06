@@ -32,7 +32,7 @@ export function ColumnMapper({
           <SelectTrigger className="w-full">
             <SelectValue placeholder="Chọn cột..." />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent position="popper" className="max-h-60 overflow-y-auto">
             {columns.map((col) => (
               <SelectItem key={col} value={col}>
                 {col}
