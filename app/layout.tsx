@@ -24,6 +24,7 @@ export default function RootLayout({
     <html lang="vi">
       <body
         className={`${inter.variable} antialiased`}
+        suppressHydrationWarning
       >
         <div className="flex flex-col h-screen">
           <TopBanner />

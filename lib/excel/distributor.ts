@@ -45,6 +45,34 @@ export function parseMRLong(
   return employees;
 }
 
+/**
+ * Đọc file lương kinh doanh THÁNG TRƯỚC để build map: Họ tên -> tập Mã Khách hàng.
+ * Dùng để ưu tiên gán lại đúng các mã khách hàng cũ cho từng nhân viên ở tháng mới.
+ * Bỏ qua dòng tổng (không có tên hoặc không có mã khách hàng).
+ */
+export function parsePreviousAssignments(
+  rows: ExcelRow[],
+  nameCol: string,
+  maKhachHangCol: string
+): Map<string, Set<string>> {
+  const map = new Map<string, Set<string>>();
+
+  for (const row of rows) {
+    const name = String(row[nameCol] ?? "").trim();
+    const maKH = String(row[maKhachHangCol] ?? "").trim();
+    if (!name || !maKH) continue;
+
+    let set = map.get(name);
+    if (!set) {
+      set = new Set<string>();
+      map.set(name, set);
+    }
+    set.add(maKH);
+  }
+
+  return map;
+}
+
 function parseAmount(value: string | number | boolean | null | undefined): number {
   if (value === null || value === undefined) return 0;
   if (typeof value === "number") return Math.round(value);
@@ -58,19 +86,28 @@ function parseAmount(value: string | number | boolean | null | undefined): numbe
 /**
  * Distribute orders from pool to employees using greedy assignment with splitting.
  * Each employee gets orders summing exactly to their target amount.
+ *
+ * `preferredByEmployee` (tùy chọn): map Họ tên -> tập Mã Khách hàng của tháng trước.
+ * Với mỗi nhân viên, hệ thống sẽ ƯU TIÊN gán các đơn có mã khách hàng cũ trước,
+ * chỉ khi không còn mã cũ phù hợp mới lấy các mã khách hàng khác bù vào.
  */
 export function distributeOrders(
   employees: Employee[],
   orderRows: ExcelRow[],
-  blDeptCol: string,
+  loaiCol: string,
+  maKhachHangCol: string,
   soJobCol: string,
-  amountCol: string
+  soSRCol: string,
+  amountCol: string,
+  preferredByEmployee: Map<string, Set<string>> = new Map()
 ): DistributionResult {
   // Build order pool
   const pool: OrderPoolItem[] = orderRows
     .map((row, index) => ({
-      blDept: String(row[blDeptCol] ?? ""),
+      loai: String(row[loaiCol] ?? ""),
+      maKhachHang: String(row[maKhachHangCol] ?? "").trim(),
       soJob: String(row[soJobCol] ?? ""),
+      soSR: String(row[soSRCol] ?? ""),
       amount: parseAmount(row[amountCol]),
       originalIndex: index,
     }))
@@ -92,43 +129,45 @@ export function distributeOrders(
   for (const emp of sortedEmployees) {
     let remaining = emp.target;
     let assigned = 0;
+    const prefSet = preferredByEmployee.get(emp.name);
 
-    while (remaining > 0 && available.length > 0) {
-      // 1. Try exact match
-      const exactIdx = available.findIndex((o) => o.amount === remaining);
+    // Gán đúng 1 đơn theo bộ lọc `allow` (khớp chính xác -> đơn lớn nhất vừa -> tách đơn).
+    // Trả về số tiền đã gán cho nhân viên ở bước này, hoặc null nếu không có đơn nào hợp lệ.
+    const allocateOne = (allow: (o: OrderPoolItem) => boolean): number | null => {
+      // 1. Khớp chính xác
+      const exactIdx = available.findIndex((o) => allow(o) && o.amount === remaining);
       if (exactIdx !== -1) {
         const order = available.splice(exactIdx, 1)[0];
         assignments.push({
           employeeName: emp.name,
-          blDept: order.blDept,
+          loai: order.loai,
+          maKhachHang: order.maKhachHang,
           soJob: order.soJob,
+          soSR: order.soSR,
           amount: order.amount,
         });
-        assigned += order.amount;
-        remaining = 0;
-        break;
+        return order.amount;
       }
 
-      // 2. Find largest order <= remaining
-      const fitIdx = available.findIndex((o) => o.amount <= remaining);
+      // 2. Đơn lớn nhất <= remaining
+      const fitIdx = available.findIndex((o) => allow(o) && o.amount <= remaining);
       if (fitIdx !== -1) {
         const order = available.splice(fitIdx, 1)[0];
         assignments.push({
           employeeName: emp.name,
-          blDept: order.blDept,
+          loai: order.loai,
+          maKhachHang: order.maKhachHang,
           soJob: order.soJob,
+          soSR: order.soSR,
           amount: order.amount,
         });
-        assigned += order.amount;
-        remaining -= order.amount;
-        continue;
+        return order.amount;
       }
 
-      // 3. No order fits - split the smallest order that's > remaining
-      // Find smallest order > remaining to minimize waste
+      // 3. Không có đơn nào vừa - tách đơn nhỏ nhất > remaining để giảm hao phí
       let splitIdx = -1;
       for (let i = available.length - 1; i >= 0; i--) {
-        if (available[i].amount > remaining) {
+        if (allow(available[i]) && available[i].amount > remaining) {
           splitIdx = i;
           break;
         }
@@ -139,22 +178,25 @@ export function distributeOrders(
         const partForEmployee = remaining;
         const partBack = order.amount - remaining;
 
-        // Assign the portion needed
+        // Gán phần cần cho nhân viên
         assignments.push({
           employeeName: emp.name,
-          blDept: order.blDept,
+          loai: order.loai,
+          maKhachHang: order.maKhachHang,
           soJob: order.soJob,
+          soSR: order.soSR,
           amount: partForEmployee,
         });
 
-        // Put remainder back in pool (sorted position)
+        // Trả phần dư về pool (đúng vị trí sắp xếp giảm dần)
         const newOrder: OrderPoolItem = {
-          blDept: order.blDept,
+          loai: order.loai,
+          maKhachHang: order.maKhachHang,
           soJob: order.soJob,
+          soSR: order.soSR,
           amount: partBack,
           originalIndex: order.originalIndex,
         };
-        // Insert in sorted position (descending)
         const insertIdx = available.findIndex((o) => o.amount <= partBack);
         if (insertIdx === -1) {
           available.push(newOrder);
@@ -163,19 +205,35 @@ export function distributeOrders(
         }
 
         splitOrders.push({
-          blDept: order.blDept,
+          loai: order.loai,
           soJob: order.soJob,
           originalAmount: order.amount,
           parts: [partForEmployee, partBack],
         });
 
-        assigned += partForEmployee;
-        remaining = 0;
-        break;
+        return partForEmployee;
       }
 
-      // Should not reach here if pool has enough total
-      break;
+      return null;
+    };
+
+    while (remaining > 0 && available.length > 0) {
+      let amt: number | null = null;
+
+      // Ưu tiên: dùng lại đúng mã khách hàng nhân viên đã có ở tháng trước (nếu còn trong pool).
+      if (prefSet && prefSet.size > 0) {
+        amt = allocateOne((o) => prefSet.has(o.maKhachHang));
+      }
+
+      // Bù vào bằng các mã khách hàng khác nếu không còn mã cũ phù hợp.
+      if (amt === null) {
+        amt = allocateOne(() => true);
+      }
+
+      if (amt === null) break; // không còn đơn nào phù hợp
+
+      assigned += amt;
+      remaining -= amt;
     }
 
     if (remaining === 0) {

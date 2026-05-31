@@ -7,13 +7,15 @@ export interface Employee {
 
 export interface OrderAssignment {
   employeeName: string;
-  blDept: string;
+  loai: string;
+  maKhachHang: string;
   soJob: string;
+  soSR: string;
   amount: number;
 }
 
 export interface SplitOrder {
-  blDept: string;
+  loai: string;
   soJob: string;
   originalAmount: number;
   parts: number[];
@@ -32,8 +34,10 @@ export interface DistributionResult {
 }
 
 export interface OrderPoolItem {
-  blDept: string;
+  loai: string;
+  maKhachHang: string;
   soJob: string;
+  soSR: string;
   amount: number;
   originalIndex: number;
 }

@@ -6,9 +6,10 @@ import { Button } from "@/components/ui/button";
 import { FileUploader } from "@/components/excel/file-uploader";
 import { DataPreview } from "@/components/excel/data-preview";
 import { ColumnMapper } from "@/components/excel/column-mapper";
+import { OrderSplitter } from "@/components/excel/order-splitter";
 import { readExcelFile } from "@/lib/excel/reader";
 import { exportToExcel } from "@/lib/excel/writer";
-import { parseMRLong, distributeOrders } from "@/lib/excel/distributor";
+import { parseMRLong, distributeOrders, parsePreviousAssignments } from "@/lib/excel/distributor";
 import type { ExcelFile, ExcelRow } from "@/types/excel";
 import type { DistributionResult } from "@/types/distribution";
 
@@ -20,9 +21,16 @@ export default function DistributeOrdersPage() {
   const [nameCol, setNameCol] = useState("");
   const [amountCol, setAmountCol] = useState("");
 
-  const [blDeptCol, setBlDeptCol] = useState("");
+  const [loaiCol, setLoaiCol] = useState("");
+  const [maKhachHangCol, setMaKhachHangCol] = useState("");
   const [soJobCol, setSoJobCol] = useState("");
+  const [soSRCol, setSoSRCol] = useState("");
   const [orderAmountCol, setOrderAmountCol] = useState("");
+
+  // File lương kinh doanh tháng trước (tùy chọn) - để ưu tiên giữ mã khách hàng cũ
+  const [prevFile, setPrevFile] = useState<ExcelFile | null>(null);
+  const [prevNameCol, setPrevNameCol] = useState("");
+  const [prevMaKhachHangCol, setPrevMaKhachHangCol] = useState("");
 
   const [outputName, setOutputName] = useState("Lương Kinh Doanh");
   const [showSubtotals, setShowSubtotals] = useState(false);
@@ -61,8 +69,10 @@ export default function DistributeOrdersPage() {
       setError("Vui lòng chọn đầy đủ cột cho file Lương doanh số (STT, Họ tên, Lương doanh số).");
       return;
     }
-    if (!blDeptCol || !soJobCol || !orderAmountCol) {
-      setError("Vui lòng chọn đầy đủ cột cho File chế (BL Dept, Số Job, Tiền).");
+    if (!loaiCol || !maKhachHangCol || !soJobCol || !soSRCol || !orderAmountCol) {
+      setError(
+        "Vui lòng chọn đầy đủ cột cho File chế (loại, Mã Khách hàng, Số Job, Số S/R, Số tiền)."
+      );
       return;
     }
 
@@ -81,12 +91,25 @@ export default function DistributeOrdersPage() {
           return;
         }
 
+        // Ưu tiên giữ mã khách hàng cũ theo file lương kinh doanh tháng trước (nếu có)
+        const preferredByEmployee =
+          prevFile && prevNameCol && prevMaKhachHangCol
+            ? parsePreviousAssignments(
+                prevFile.sheets[0].rows,
+                prevNameCol,
+                prevMaKhachHangCol
+              )
+            : new Map<string, Set<string>>();
+
         const distributionResult = distributeOrders(
           employees,
           orderSheet.rows,
-          blDeptCol,
+          loaiCol,
+          maKhachHangCol,
           soJobCol,
-          orderAmountCol
+          soSRCol,
+          orderAmountCol,
+          preferredByEmployee
         );
         setResult(distributionResult);
       } catch (err) {
@@ -99,7 +122,7 @@ export default function DistributeOrdersPage() {
         setLoading(false);
       }
     }, 50);
-  }, [mrFile, orderFile, sttCol, nameCol, amountCol, blDeptCol, soJobCol, orderAmountCol]);
+  }, [mrFile, orderFile, sttCol, nameCol, amountCol, loaiCol, maKhachHangCol, soJobCol, soSRCol, orderAmountCol, prevFile, prevNameCol, prevMaKhachHangCol]);
 
   const buildExportData = useCallback(
     (withSubtotals: boolean): ExcelRow[] => {
@@ -107,9 +130,11 @@ export default function DistributeOrdersPage() {
       if (!withSubtotals) {
         return result.assignments.map((a) => ({
           "Họ tên": a.employeeName,
-          "BL Dept": a.blDept,
+          "BL Dept": a.loai,
+          "Mã Khách Hàng": a.maKhachHang,
           "Số Job": a.soJob,
-          "Tiền": a.amount,
+          "Số S/R": a.soSR,
+          "Số Tiền": a.amount,
         }));
       }
 
@@ -124,8 +149,10 @@ export default function DistributeOrdersPage() {
             rows.push({
               "Họ tên": "",
               "BL Dept": "",
+              "Mã Khách Hàng": "",
               "Số Job": "",
-              "Tiền": subtotal,
+              "Số S/R": "",
+              "Số Tiền": subtotal,
             });
           }
           currentName = a.employeeName;
@@ -133,9 +160,11 @@ export default function DistributeOrdersPage() {
         }
         rows.push({
           "Họ tên": a.employeeName,
-          "BL Dept": a.blDept,
+          "BL Dept": a.loai,
+          "Mã Khách Hàng": a.maKhachHang,
           "Số Job": a.soJob,
-          "Tiền": a.amount,
+          "Số S/R": a.soSR,
+          "Số Tiền": a.amount,
         });
         subtotal += a.amount;
       }
@@ -144,8 +173,10 @@ export default function DistributeOrdersPage() {
         rows.push({
           "Họ tên": "",
           "BL Dept": "",
+          "Mã Khách Hàng": "",
           "Số Job": "",
-          "Tiền": subtotal,
+          "Số S/R": "",
+          "Số Tiền": subtotal,
         });
       }
       return rows;
@@ -169,8 +200,9 @@ export default function DistributeOrdersPage() {
 
   const mrSheet = mrFile?.sheets[0];
   const orderSheet = orderFile?.sheets[0];
+  const prevSheet = prevFile?.sheets[0];
 
-  const resultPreviewHeaders = ["Họ tên", "BL Dept", "Số Job", "Tiền"];
+  const resultPreviewHeaders = ["Họ tên", "BL Dept", "Mã Khách Hàng", "Số Job", "Số S/R", "Số Tiền"];
   const resultPreviewRows: ExcelRow[] = buildExportData(showSubtotals);
 
   return (
@@ -188,6 +220,9 @@ export default function DistributeOrdersPage() {
           <p className="text-sm text-destructive font-medium">Lỗi: {error}</p>
         </div>
       )}
+
+      {/* Tiền xử lý: tách đơn lớn trong file chế */}
+      <OrderSplitter />
 
       {/* Khu vực upload + hướng dẫn */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
@@ -222,14 +257,16 @@ export default function DistributeOrdersPage() {
             onFileSelect={(f) => handleFileSelect(f, setOrderFile)}
             onClear={() => {
               setOrderFile(null);
-              setBlDeptCol("");
+              setLoaiCol("");
+              setMaKhachHangCol("");
               setSoJobCol("");
+              setSoSRCol("");
               setOrderAmountCol("");
               setResult(null);
             }}
           />
           <p className="text-xs text-muted-foreground mt-2 px-1">
-            File này cần có BL Dept, Số Job, Tiền.{" "}
+            File này cần có loại, Mã Khách hàng, Số Job, Số S/R, Số tiền.{" "}
             <a
               href="/examples/file-che-mau.xlsx"
               download
@@ -249,8 +286,12 @@ export default function DistributeOrdersPage() {
               với cột STT, Họ tên, Lương doanh số.
             </li>
             <li>
-              Upload <strong>File chế</strong> — file chứa pool đơn hàng với cột BL Dept, Số Job,
-              Tiền.
+              Upload <strong>File chế</strong> — file chứa pool đơn hàng với cột loại, Mã Khách
+              hàng, Số Job, Số S/R, Số tiền.
+            </li>
+            <li>
+              (Tùy chọn) Upload <strong>File lương kinh doanh tháng trước</strong> để ưu tiên giữ
+              lại đúng Mã Khách hàng cũ cho từng nhân viên.
             </li>
             <li>
               Chọn đúng cột tương ứng cho mỗi file ở phần <strong>Chọn cột</strong> bên dưới.
@@ -272,11 +313,49 @@ export default function DistributeOrdersPage() {
           </ol>
           <div className="mt-3 pt-3 border-t border-border">
             <p className="text-xs text-muted-foreground">
-              <strong>Lưu ý:</strong> Đơn hàng có thể bị tách thành 2 phần (cùng BL Dept + Số Job)
+              <strong>Lưu ý:</strong> Đơn hàng có thể bị tách thành 2 phần (cùng loại + Số Job)
               để đảm bảo tổng tiền chính xác. Tải file mẫu ở mỗi ô upload để xem định dạng chuẩn.
             </p>
           </div>
         </div>
+      </div>
+
+      {/* File lương kinh doanh tháng trước (tùy chọn) */}
+      <div className="mb-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div>
+          <FileUploader
+            label="File lương kinh doanh tháng trước (tùy chọn)"
+            fileName={prevFile?.fileName}
+            onFileSelect={(f) => handleFileSelect(f, setPrevFile)}
+            onClear={() => {
+              setPrevFile(null);
+              setPrevNameCol("");
+              setPrevMaKhachHangCol("");
+              setResult(null);
+            }}
+          />
+          <p className="text-xs text-muted-foreground mt-2 px-1">
+            Nếu có, hệ thống sẽ <strong>ưu tiên</strong> gán lại đúng Mã Khách hàng mà mỗi
+            nhân viên (theo Họ tên) đã có ở tháng trước — khi mã đó còn trong File chế. Không
+            đủ thì lấy các mã khách hàng khác bù vào.
+          </p>
+        </div>
+        {prevSheet && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 self-start">
+            <ColumnMapper
+              label="Cột Họ tên (tháng trước)"
+              columns={prevSheet.headers}
+              selectedColumn={prevNameCol}
+              onSelect={setPrevNameCol}
+            />
+            <ColumnMapper
+              label="Cột Mã Khách hàng (tháng trước)"
+              columns={prevSheet.headers}
+              selectedColumn={prevMaKhachHangCol}
+              onSelect={setPrevMaKhachHangCol}
+            />
+          </div>
+        )}
       </div>
 
       {/* Xem trước dữ liệu */}
@@ -296,6 +375,16 @@ export default function DistributeOrdersPage() {
             title={`Xem trước: ${orderFile!.fileName}`}
             headers={orderSheet.headers}
             rows={orderSheet.rows}
+            maxRows={5}
+          />
+        </div>
+      )}
+      {prevSheet && (
+        <div className="mb-4">
+          <DataPreview
+            title={`Xem trước (tháng trước): ${prevFile!.fileName}`}
+            headers={prevSheet.headers}
+            rows={prevSheet.rows}
             maxRows={5}
           />
         </div>
@@ -334,10 +423,16 @@ export default function DistributeOrdersPage() {
           <h2 className="text-sm font-semibold mb-3">Chọn cột - File chế</h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <ColumnMapper
-              label="Cột BL Dept"
+              label="Cột loại"
               columns={orderSheet.headers}
-              selectedColumn={blDeptCol}
-              onSelect={setBlDeptCol}
+              selectedColumn={loaiCol}
+              onSelect={setLoaiCol}
+            />
+            <ColumnMapper
+              label="Cột Mã Khách hàng"
+              columns={orderSheet.headers}
+              selectedColumn={maKhachHangCol}
+              onSelect={setMaKhachHangCol}
             />
             <ColumnMapper
               label="Cột Số Job"
@@ -346,7 +441,13 @@ export default function DistributeOrdersPage() {
               onSelect={setSoJobCol}
             />
             <ColumnMapper
-              label="Cột Tiền"
+              label="Cột Số S/R"
+              columns={orderSheet.headers}
+              selectedColumn={soSRCol}
+              onSelect={setSoSRCol}
+            />
+            <ColumnMapper
+              label="Cột Số tiền"
               columns={orderSheet.headers}
               selectedColumn={orderAmountCol}
               onSelect={setOrderAmountCol}
@@ -387,7 +488,7 @@ export default function DistributeOrdersPage() {
         <div className="flex items-center gap-3 mb-6">
           <Button
             onClick={handleDistribute}
-            disabled={loading || !sttCol || !nameCol || !amountCol || !blDeptCol || !soJobCol || !orderAmountCol}
+            disabled={loading || !sttCol || !nameCol || !amountCol || !loaiCol || !maKhachHangCol || !soJobCol || !soSRCol || !orderAmountCol}
           >
             {loading ? "Đang xử lý..." : "Thực hiện phân bổ"}
           </Button>
@@ -479,7 +580,7 @@ export default function DistributeOrdersPage() {
               <ul className="text-sm text-yellow-600 dark:text-yellow-500 space-y-1 max-h-40 overflow-y-auto">
                 {result.splitOrders.map((s, i) => (
                   <li key={i}>
-                    {s.blDept} / {s.soJob}: {s.originalAmount.toLocaleString()} -&gt;{" "}
+                    {s.loai} / {s.soJob}: {s.originalAmount.toLocaleString()} -&gt;{" "}
                     {s.parts.map((p) => p.toLocaleString()).join(" + ")}
                   </li>
                 ))}
