@@ -278,8 +278,10 @@ export default function DistributeOrdersPage() {
         </div>
 
         {/* Hướng dẫn sử dụng */}
-        <div className="p-4 border border-border rounded-md bg-muted/30">
-          <h3 className="text-sm font-semibold mb-3">Hướng dẫn sử dụng</h3>
+        <div className="relative min-h-[240px]">
+          <div className="absolute inset-0 flex flex-col p-4 border border-border rounded-md bg-muted/30 overflow-hidden">
+            <h3 className="text-sm font-semibold mb-3 shrink-0">Hướng dẫn sử dụng</h3>
+            <div className="overflow-y-auto pr-1 -mr-1">
           <ol className="text-xs text-muted-foreground space-y-2 list-decimal list-inside">
             <li>
               Upload <strong>File lương doanh số nhân viên</strong> — file chứa danh sách nhân viên
@@ -316,6 +318,8 @@ export default function DistributeOrdersPage() {
               <strong>Lưu ý:</strong> Đơn hàng có thể bị tách thành 2 phần (cùng loại + Số Job)
               để đảm bảo tổng tiền chính xác. Tải file mẫu ở mỗi ô upload để xem định dạng chuẩn.
             </p>
+          </div>
+            </div>
           </div>
         </div>
       </div>
